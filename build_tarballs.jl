@@ -122,7 +122,7 @@ if !isfile(tblgen_tarball)
     if "--debug" in ARGS
         push!(tblgen_ARGS, "--debug")
     end
-    product_hashes = build_tarballs(tblgen_ARGS, "tblgen", llvm_ver, sources, script, platforms, products, dependencies)
+    product_hashes = build_tarballs(["--verbose", "--debug"], "tblgen", llvm_ver, sources, script, platforms, products, dependencies)
 
     # Extract path information to the built tblgen tarball and its hash
     tblgen_tarball, tblgen_hash = product_hashes["x86_64-linux-musl"]
@@ -140,6 +140,15 @@ push!(sources, tblgen_tarball => tblgen_hash)
 
 # Next, we will Bash recipe for building across all platforms
 script = script_setup * raw"""
+
+# WebAssembly/Emscripten needs this 
+#     -- really, should be built as part of the Emscripten shard
+if [[ ${target} == wasm32-* ]]; then
+    emcc -v
+    apk add nodejs
+fi
+
+
 # This value is really useful later
 LLVM_DIR=$(pwd)
 
@@ -160,7 +169,7 @@ fi
 
 # Also target Wasm because Javascript is the Platform Of The Future (TM)
 # Actually, turn this off because we need it to work with The Julia Of Today (TM)
-#CMAKE_FLAGS="${CMAKE_FLAGS} -DLLVM_EXPERIMENTAL_TARGETS_TO_BUILD:STRING=\"WebAssembly\""
+CMAKE_FLAGS="${CMAKE_FLAGS} -DLLVM_EXPERIMENTAL_TARGETS_TO_BUILD:STRING=\"WebAssembly\""
 
 if [[ "${CHECK}" == "0" ]]; then
     CMAKE_FLAGS="${CMAKE_FLAGS} -DCMAKE_BUILD_TYPE=Release"
@@ -219,7 +228,7 @@ CMAKE_FLAGS="${CMAKE_FLAGS} -DCLANG_TABLEGEN=${WORKSPACE}/srcdir/bin/clang-tblge
 CMAKE_FLAGS="${CMAKE_FLAGS} -DLLVM_CONFIG_PATH=${WORKSPACE}/srcdir/bin/llvm-config"
 
 # Explicitly use our cmake toolchain file
-CMAKE_FLAGS="${CMAKE_FLAGS} -DCMAKE_TOOLCHAIN_FILE=/opt/${target}/${target}.toolchain"
+CMAKE_FLAGS="${CMAKE_FLAGS} -DCMAKE_TOOLCHAIN_FILE=/opt/${host_target}/${target}.toolchain"
 
 # Manually set the host triplet, as otherwise on some platforms it tries to guess using
 # `ld -v`, which is hilariously wrong.
@@ -274,9 +283,21 @@ if [[ "${target}" == *musl* ]]; then
     CMAKE_FLAGS="${CMAKE_FLAGS} -DCOMPILER_RT_BUILD_XRAY=OFF"
 fi
 
+if [[ "${target}" == wasm32* ]]; then
+    CMAKE_FLAGS="-DLLVM_TARGETS_TO_BUILD:STRING=host -DLLVM_EXPERIMENTAL_TARGETS_TO_BUILD:STRING=WebAssembly -DCMAKE_BUILD_TYPE=Release "
+    CMAKE_FLAGS+=" -DLLVM_BINDINGS_LIST= -DLLVM_ENABLE_ZLIB=OFF -DLLVM_ENABLE_LIBXML2=OFF -DLLVM_INCLUDE_DOCS=Off -DLLVM_ENABLE_TERMINFO=Off "
+    CMAKE_FLAGS+=" -DHAVE_HISTEDIT_H=Off -DHAVE_LIBEDIT=Off -DLLVM_BUILD_LLVM_DYLIB:BOOL=ON -DLLVM_LINK_LLVM_DYLIB:BOOL=ON "
+    CMAKE_FLAGS+=" -DCMAKE_INSTALL_PREFIX=/workspace/destdir -DCMAKE_CROSSCOMPILING=True -DLLVM_INCLUDE_UTILS=False -DLLVM_INSTALL_UTILS=False "
+    CMAKE_FLAGS+=" -DLLVM_TABLEGEN=/workspace/srcdir/bin/llvm-tblgen -DLLVM_CONFIG_PATH=/workspace/srcdir/bin/llvm-config "
+    CMAKE_FLAGS+=" -DCMAKE_TOOLCHAIN_FILE=/opt/x86_64-linux-gnu/lib/emscripten/cmake/Modules/Platform/Emscripten.cmake "
+    CMAKE_FLAGS+=" -DLLVM_HOST_TRIPLE=wasm32-unknown-emscripten -DLLVM_TOOL_LIBUNWIND_BUILD=OFF -DLLVM_TOOL_LIBCXX_BUILD=OFF "
+    CMAKE_FLAGS+=" -DLLVM_TOOL_LIBCXXABI_BUILD=OFF -DLLVM_POLLY_BUILD=OFF -DLLVM_INCLUDE_TOOLS=OFF -DLLVM_BUILD_TOOLS=OFF "
+    CMAKE_FLAGS+=" -DLLVM_INCLUDE_TESTS=OFF -DLLVM_ENABLE_THREADS=OFF"
+fi
+
 # Build!
-cmake .. ${CMAKE_FLAGS} -DCMAKE_C_FLAGS="${CMAKE_CPP_FLAGS} ${CMAKE_C_FLAGS}" -DCMAKE_CXX_FLAGS="${CMAKE_CPP_FLAGS} ${CMAKE_CXX_FLAGS}"
-cmake -LA || true
+emconfigure cmake .. ${CMAKE_FLAGS} -DCMAKE_C_FLAGS="${CMAKE_CPP_FLAGS} ${CMAKE_C_FLAGS}" -DCMAKE_CXX_FLAGS="${CMAKE_CPP_FLAGS} ${CMAKE_CXX_FLAGS}"
+emconfigure cmake -LA || true
 make -j${nproc} VERBOSE=1
 
 # Test
@@ -288,11 +309,11 @@ fi
 make install -j${nproc} VERBOSE=1
 
 # move clang products out of $prefix/bin to $prefix/tools
-mv ${prefix}/bin/clang* ${prefix}/tools/
-mv ${prefix}/bin/scan-* ${prefix}/tools/
-mv ${prefix}/bin/c-index* ${prefix}/tools/
-mv ${prefix}/bin/git-clang* ${prefix}/tools/
-mv ${prefix}/bin/lld* ${prefix}/tools/
+# mv ${prefix}/bin/clang* ${prefix}/tools/
+# mv ${prefix}/bin/scan-* ${prefix}/tools/
+# mv ${prefix}/bin/c-index* ${prefix}/tools/
+# mv ${prefix}/bin/git-clang* ${prefix}/tools/
+# mv ${prefix}/bin/lld* ${prefix}/tools/
 
 # Life is harsh on Windows and dynamic libraries are
 # expected to live alongside the binaries. So we have
@@ -309,12 +330,12 @@ if [[ "${target}" == *darwin* ]]; then
 fi
 
 # Lit is a python dependency and there is no proper install target
-cp -r ../utils/lit ${prefix}/tools/
+# cp -r ../utils/lit ${prefix}/tools/
 
 # Lots of tools don't respect `$DSYMUTIL` and so thus do not find 
 # our cleverly-named `llvm-dsymutil`.  We create a symlink to help
 # Those poor fools along:
-ln -s llvm-dsymutil ${prefix}/tools/dsymutil
+# ln -s llvm-dsymutil ${prefix}/tools/dsymutil
 """
 
 if "--llvm-check" in llvm_ARGS
@@ -327,18 +348,19 @@ else
     # These are the platforms we will build for by default, unless further
     # platforms are passed in on the command line
     platforms = [
-        BinaryProvider.Linux(:i686, :glibc),
-        BinaryProvider.Linux(:x86_64, :glibc),
-        BinaryProvider.Linux(:x86_64, :musl),
-        BinaryProvider.Linux(:aarch64, :glibc),
-        BinaryProvider.Linux(:armv7l, :glibc),
-        BinaryProvider.Linux(:powerpc64le, :glibc),
-        BinaryProvider.MacOS(),
-        BinaryProvider.Windows(:i686),
-        BinaryProvider.Windows(:x86_64)
+        # BinaryProvider.Linux(:i686, :glibc),
+        # BinaryProvider.Linux(:x86_64, :glibc),
+        # BinaryProvider.Linux(:x86_64, :musl),
+        # BinaryProvider.Linux(:aarch64, :glibc),
+        # BinaryProvider.Linux(:armv7l, :glibc),
+        # BinaryProvider.Linux(:powerpc64le, :glibc),
+        # BinaryProvider.MacOS(),
+        # BinaryProvider.Windows(:i686),
+        # BinaryProvider.Windows(:x86_64)
     ]
-    platforms = expand_gcc_versions(platforms)
+    # platforms = expand_gcc_versions(platforms)
 end
+pushfirst!(platforms, BinaryProvider.WebAssembly())
 
 # The products that we will ensure are always built
 products(prefix) = [
@@ -375,7 +397,7 @@ else
    config *= "CHECK=0\n"
 end
 
-build_tarballs(ARGS, name, llvm_ver, sources, config * script, platforms, products, dependencies)
+build_tarballs(["--verbose", "--debug"], name, llvm_ver, sources, config * script, platforms, products, dependencies)
 
 if !("--llvm-keep-tblgen" in llvm_ARGS)
     # Remove tblgen tarball as it's no longer useful, and we don't want to upload them.

@@ -1,0 +1,13 @@
+Index: lib/Support/Unix/Path.inc
+===================================================================
+--- a/lib/Support/Unix/Path.inc
++++ b/lib/Support/Unix/Path.inc
+@@ -385,6 +385,8 @@
+   StringRef fstype(Vfs.f_basetype);
+   // NFS is the only non-local fstype??
+   return !fstype.equals("nfs");
++#elif defined(__EMSCRIPTEN__)
++  return true;
+ #else
+   return !!(STATVFS_F_FLAG(Vfs) & MNT_LOCAL);
+ #endif
