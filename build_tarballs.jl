@@ -141,14 +141,6 @@ push!(sources, tblgen_tarball => tblgen_hash)
 # Next, we will Bash recipe for building across all platforms
 script = script_setup * raw"""
 
-# WebAssembly/Emscripten needs this 
-#     -- really, should be built as part of the Emscripten shard
-if [[ ${target} == wasm32-* ]]; then
-    emcc -v
-    apk add nodejs
-fi
-
-
 # This value is really useful later
 LLVM_DIR=$(pwd)
 
@@ -289,7 +281,7 @@ if [[ "${target}" == wasm32* ]]; then
     CMAKE_FLAGS+=" -DHAVE_HISTEDIT_H=Off -DHAVE_LIBEDIT=Off -DLLVM_BUILD_LLVM_DYLIB:BOOL=ON -DLLVM_LINK_LLVM_DYLIB:BOOL=ON "
     CMAKE_FLAGS+=" -DCMAKE_INSTALL_PREFIX=/workspace/destdir -DCMAKE_CROSSCOMPILING=True -DLLVM_INCLUDE_UTILS=False -DLLVM_INSTALL_UTILS=False "
     CMAKE_FLAGS+=" -DLLVM_TABLEGEN=/workspace/srcdir/bin/llvm-tblgen -DLLVM_CONFIG_PATH=/workspace/srcdir/bin/llvm-config "
-    CMAKE_FLAGS+=" -DCMAKE_TOOLCHAIN_FILE=/opt/x86_64-linux-gnu/lib/emscripten/cmake/Modules/Platform/Emscripten.cmake "
+    CMAKE_FLAGS+=" -DCMAKE_TOOLCHAIN_FILE=/opt/wasm32-unknown-emscripten/wasm32-unknown-emscripten.toolchain "
     CMAKE_FLAGS+=" -DLLVM_HOST_TRIPLE=wasm32-unknown-emscripten -DLLVM_TOOL_LIBUNWIND_BUILD=OFF -DLLVM_TOOL_LIBCXX_BUILD=OFF "
     CMAKE_FLAGS+=" -DLLVM_TOOL_LIBCXXABI_BUILD=OFF -DLLVM_POLLY_BUILD=OFF -DLLVM_INCLUDE_TOOLS=OFF -DLLVM_BUILD_TOOLS=OFF "
     CMAKE_FLAGS+=" -DLLVM_INCLUDE_TESTS=OFF -DLLVM_ENABLE_THREADS=OFF"
@@ -308,12 +300,21 @@ fi
 # Install!
 make install -j${nproc} VERBOSE=1
 
-# move clang products out of $prefix/bin to $prefix/tools
-# mv ${prefix}/bin/clang* ${prefix}/tools/
-# mv ${prefix}/bin/scan-* ${prefix}/tools/
-# mv ${prefix}/bin/c-index* ${prefix}/tools/
-# mv ${prefix}/bin/git-clang* ${prefix}/tools/
-# mv ${prefix}/bin/lld* ${prefix}/tools/
+if [[ "${target}" != wasm32* ]]; then
+    # move clang products out of $prefix/bin to $prefix/tools
+    mv ${prefix}/bin/clang* ${prefix}/tools/
+    mv ${prefix}/bin/scan-* ${prefix}/tools/
+    mv ${prefix}/bin/c-index* ${prefix}/tools/
+    mv ${prefix}/bin/git-clang* ${prefix}/tools/
+    mv ${prefix}/bin/lld* ${prefix}/tools/
+    # Lit is a python dependency and there is no proper install target
+    cp -r ../utils/lit ${prefix}/tools/
+    
+    # Lots of tools don't respect `$DSYMUTIL` and so thus do not find 
+    # our cleverly-named `llvm-dsymutil`.  We create a symlink to help
+    # Those poor fools along:
+    ln -s llvm-dsymutil ${prefix}/tools/dsymutil
+fi
 
 # Life is harsh on Windows and dynamic libraries are
 # expected to live alongside the binaries. So we have
@@ -329,13 +330,6 @@ if [[ "${target}" == *darwin* ]]; then
     ln -s libLLVM.dylib ${prefix}/lib/libLLVM-${LLVM_VER##*-}.dylib
 fi
 
-# Lit is a python dependency and there is no proper install target
-# cp -r ../utils/lit ${prefix}/tools/
-
-# Lots of tools don't respect `$DSYMUTIL` and so thus do not find 
-# our cleverly-named `llvm-dsymutil`.  We create a symlink to help
-# Those poor fools along:
-# ln -s llvm-dsymutil ${prefix}/tools/dsymutil
 """
 
 if "--llvm-check" in llvm_ARGS
